@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.8)
+project(drone_utils)
+
+find_package(ament_cmake REQUIRED)
+
+install(DIRECTORY
+  launch
+  config
+  scripts
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_package()
