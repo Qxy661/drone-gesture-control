@@ -1,0 +1,24 @@
+# ==========================================
+# Autonomous Navigation Parameters
+# ==========================================
+
+waypoint_navigator:
+  ros__parameters:
+    test_mode: true
+    takeoff_altitude: 2.0
+    waypoint_radius: 0.5
+    cruise_speed: 1.0
+
+mission_manager:
+  ros__parameters:
+    planner_type: astar   # astar / rrt
+    map_width: 100
+    map_height: 100
+    resolution: 0.1
+    test_mode: true
+
+obstacle_map:
+  ros__parameters:
+    map_width: 100
+    map_height: 100
+    resolution: 0.1
