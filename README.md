@@ -1,6 +1,6 @@
 # Drone Autonomy Suite
 
-基于 ROS2 Humble 的无人机自主飞行系统。三个子项目覆盖 **感知→决策→控制** 全链路。
+基于 ROS2 Humble 的无人机自主飞行系统。四个子项目覆盖 **感知→决策→控制→降落** 全链路。
 
 ## 架构
 
@@ -14,16 +14,25 @@
 │         │                 │                  │             │
 │         └─────────┬───────┴──────────────────┘             │
 │                   │                                        │
-│            ┌──────▼───────┐                               │
-│            │    MAVROS     │                               │
-│            └──────┬───────┘                               │
-└───────────────────┼───────────────────────────────────────┘
-                    │ UART
-             ┌──────▼───────┐
-             │  飞控 V5+     │
-             │  ArduCopter   │
-             └──────────────┘
+│            ┌──────▼───────┐  ┌──────────────┐             │
+│            │    MAVROS     │  │ drone_landing │             │
+│            └──────┬───────┘  │ 精准视觉降落  │             │
+│                   │          └──────┬───────┘             │
+└───────────────────┼─────────────────┼─────────────────────┘
+                    │ UART            │
+             ┌──────▼─────────────────▼──────┐
+             │       飞控 V5+ (ArduCopter)    │
+             └────────────────────────────────┘
 ```
+
+## 项目列表
+
+| 包 | 功能 | 核心技术 | 代码量 |
+|---|------|---------|-------|
+| drone_gesture | 手势识别控制 | MediaPipe + 状态机 + 速度映射 | ~1200行 |
+| drone_nav | 自主导航 | A*/RRT/RRT* + DWA + 坐标转换 | ~1000行 |
+| drone_vision | 视觉跟踪 | YOLOv8 + 卡尔曼滤波 + 视觉伺服 | ~1300行 |
+| drone_landing | 精准降落 | ArUco + PnP 6DOF + 级联PID | ~800行 |
 
 ## 技术亮点
 
@@ -35,6 +44,8 @@
 | 卡尔曼滤波跟踪 | 状态估计+遮挡预测+多目标管理 | kalman_tracker.py |
 | YOLOv8 目标检测 | 通用检测+实时跟踪 | yolo_detector.py |
 | PID 视觉伺服 | CENTER/FOLLOW/CIRCLE 三模式 | visual_servo.py |
+| ArUco 6DOF 位姿 | solvePnP+迭代优化 | aruco_pose.py |
+| 精准降落控制 | 级联PID+5阶段状态机 | landing_controller.py |
 | 安全监控 | 电量/连接/心跳+自动紧急降落 | safety_monitor.py |
 | 系统诊断 | CPU/内存/FPS 聚合+服务查询 | diagnostics.py |
 
@@ -50,11 +61,13 @@ python3 src/drone_nav/test/test_path_planner.py
 python3 src/drone_nav/test/test_dwa.py
 python3 src/drone_vision/test/test_camera_model.py
 python3 src/drone_vision/test/test_kalman.py
+python3 src/drone_landing/test/test_aruco_pose.py
 
 # 启动系统 (测试模式, 不需要硬件)
 ros2 launch drone_gesture gesture_full.launch.py test_mode:=true
 ros2 launch drone_nav nav_test.launch.py
 ros2 launch drone_vision vision_test.launch.py
+ros2 launch drone_landing landing_test.launch.py
 ```
 
 ## 依赖
