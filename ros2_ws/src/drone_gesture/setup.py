@@ -4,7 +4,7 @@ package_name = "drone_gesture"
 
 setup(
     name=package_name,
-    version="0.2.0",
+    version="0.3.0",
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
@@ -31,6 +31,7 @@ setup(
             "gesture_commander = drone_gesture.gesture_commander:main",
             "safety_monitor = drone_gesture.safety_monitor:main",
             "diagnostics = drone_gesture.diagnostics:main",
+            "gesture_velocity_controller = drone_gesture.gesture_velocity_controller:main",
         ],
     },
 )

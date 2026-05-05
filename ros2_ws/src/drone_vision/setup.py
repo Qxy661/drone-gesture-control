@@ -4,7 +4,7 @@ package_name = "drone_vision"
 
 setup(
     name=package_name,
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
@@ -21,7 +21,7 @@ setup(
     zip_safe=True,
     maintainer="user",
     maintainer_email="dev@example.com",
-    description="Drone visual target tracking system",
+    description="Drone visual target tracking - YOLOv8 + Kalman filter",
     license="MIT",
     tests_require=["pytest"],
     entry_points={
@@ -29,6 +29,7 @@ setup(
             "target_detector = drone_vision.target_detector:main",
             "visual_servo = drone_vision.visual_servo:main",
             "tracking_manager = drone_vision.tracking_manager:main",
+            "yolo_detector = drone_vision.yolo_detector:main",
         ],
     },
 )

@@ -1,289 +1,276 @@
+"""path_planner.py - Path planning algorithms for 2D occupancy grid maps.
+Contains: AStarPlanner, RRTPlanner, RRTStarPlanner
+No ROS dependency. All planners work on 2D grid (0=free, 1=obstacle).
+Paths returned as list of (x, y) tuples in grid coordinates.
 """
-路径规划算法库
-Path Planning Algorithms
-
-实现:
-- AStarPlanner: A* 栅格搜索
-- RRTPlanner: 快速随机树
-- RRTStarPlanner: RRT* (带路径优化)
-
-所有规划器在 2D 栅格地图上工作, 返回路径点列表 [(x,y), ...]
-纯 Python 实现, 不依赖 ROS, 可独立使用
-"""
-import math
-import random
-import heapq
+import math, random, heapq
 from typing import List, Tuple, Optional
-from dataclasses import dataclass, field
 
+GridPos = Tuple[int, int]
+Path = List[Tuple[float, float]]
 
-@dataclass
-class GridMap:
-    """2D 栅格地图
-    0 = 可通行, 1 = 障碍物
-    """
-    width: int
-    height: int
-    resolution: float = 0.1  # 每格代表的米数
-    data: list = field(default_factory=list)
+def _h_euclid(a, b):
+    return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
 
-    def __post_init__(self):
-        if not self.data:
-            self.data = [[0] * self.width for _ in range(self.height)]
+def _h_manhattan(a, b):
+    return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
-    def set_obstacle(self, x: int, y: int):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            self.data[y][x] = 1
-
-    def is_free(self, x: int, y: int) -> bool:
-        if 0 <= x < self.width and 0 <= y < self.height:
-            return self.data[y][x] == 0
-        return False
-
-    def world_to_grid(self, wx: float, wy: float) -> Tuple[int, int]:
-        return int(wx / self.resolution), int(wy / self.resolution)
-
-    def grid_to_world(self, gx: int, gy: int) -> Tuple[float, float]:
-        return gx * self.resolution, gy * self.resolution
-
+def _h_chebyshev(a, b):
+    return max(abs(a[0]-b[0]), abs(a[1]-b[1]))
 
 class AStarPlanner:
-    """A* 路径规划器
+    """A* search on 2D grid. f(n)=g(n)+h(n). Supports 4/8-connectivity."""
+    DIRS8 = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
 
-    A* = Dijkstra + 启发函数
-    - f(n) = g(n) + h(n)
-    - g(n): 从起点到当前节点的实际代价
-    - h(n): 从当前节点到终点的估计代价 (启发式)
-    - 保证最优解 (当 h 是可接受的)
+    def __init__(self, grid, connectivity=8, heuristic="euclidean"):
+        self.grid = grid
+        self.rows = len(grid)
+        self.cols = len(grid[0]) if self.rows > 0 else 0
+        self.conn = connectivity
+        hm = {"euclidean": _h_euclid, "manhattan": _h_manhattan, "chebyshev": _h_chebyshev}
+        self.h = hm.get(heuristic, _h_euclid)
 
-    常用启发函数:
-    - 欧氏距离: sqrt(dx^2 + dy^2) -- 8方向移动
-    - 曼哈顿距离: |dx| + |dy| -- 4方向移动
-    """
-    # 8方向移动 (含对角线)
-    DIRS_8 = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
-    COSTS_8 = [1, 1, 1, 1, 1.414, 1.414, 1.414, 1.414]
+    def _ok(self, pos):
+        r, c = pos
+        return 0 <= r < self.rows and 0 <= c < self.cols and self.grid[r][c] == 0
 
-    # 4方向移动
-    DIRS_4 = [(0,1),(0,-1),(1,0),(-1,0)]
+    def _neighbors(self, pos):
+        result = []
+        dirs = self.DIRS8 if self.conn == 8 else self.DIRS8[:4]
+        for dr, dc in dirs:
+            nr, nc = pos[0]+dr, pos[1]+dc
+            if self._ok((nr, nc)):
+                if abs(dr)+abs(dc) == 2:
+                    if self.grid[pos[0]+dr][pos[1]] == 0 or self.grid[pos[0]][pos[1]+dc] == 0:
+                        result.append(((nr, nc), math.sqrt(2)))
+                    else:
+                        continue
+                else:
+                    result.append(((nr, nc), 1.0))
+        return result
 
-    def __init__(self, grid_map: GridMap, use_diagonal: bool = True):
-        self.map = grid_map
-        self.dirs = self.DIRS_8 if use_diagonal else self.DIRS_4
-        self.costs = self.COSTS_8 if use_diagonal else [1,1,1,1]
-
-    def plan(self, start: Tuple[int, int], goal: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
-        """A* 搜索
-        返回: 路径点列表 (栅格坐标), 或 None (无解)
-        """
-        sx, sy = start
-        gx, gy = goal
-        if not self.map.is_free(sx, sy) or not self.map.is_free(gx, gy):
+    def plan(self, start, goal):
+        """A* search. Returns [(x,y),...] or None."""
+        if not self._ok(start) or not self._ok(goal):
             return None
-
-        # 优先队列: (f_score, x, y)
-        open_set = [(0, sx, sy)]
-        came_from = {}
-        g_score = {(sx, sy): 0}
-
-        while open_set:
-            _, cx, cy = heapq.heappop(open_set)
-
-            if (cx, cy) == (gx, gy):
-                return self._reconstruct(came_from, (cx, cy))
-
-            for (dx, dy), cost in zip(self.dirs, self.costs):
-                nx, ny = cx + dx, cy + dy
-                if not self.map.is_free(nx, ny):
+        open_list = [(0.0, start)]
+        closed = set()
+        g = {start: 0.0}
+        parent = {}
+        while open_list:
+            _, cur = heapq.heappop(open_list)
+            if cur == goal:
+                path = [cur]
+                while cur in parent:
+                    cur = parent[cur]
+                    path.append(cur)
+                path.reverse()
+                return [(float(p[1]), float(p[0])) for p in path]
+            if cur in closed:
+                continue
+            closed.add(cur)
+            for nb, cost in self._neighbors(cur):
+                if nb in closed:
                     continue
-
-                new_g = g_score[(cx, cy)] + cost
-                if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
-                    g_score[(nx, ny)] = new_g
-                    f = new_g + self._heuristic(nx, ny, gx, gy)
-                    heapq.heappush(open_set, (f, nx, ny))
-                    came_from[(nx, ny)] = (cx, cy)
-
-        return None  # 无解
-
-    def _heuristic(self, x1, y1, x2, y2):
-        """欧氏距离启发函数"""
-        return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
-    def _reconstruct(self, came_from, current):
-        path = [current]
-        while current in came_from:
-            current = came_from[current]
-            path.append(current)
-        path.reverse()
-        return path
-
+                ng = g[cur] + cost
+                if nb not in g or ng < g[nb]:
+                    g[nb] = ng
+                    parent[nb] = cur
+                    heapq.heappush(open_list, (ng + self.h(nb, goal), nb))
+        return None
 
 class RRTPlanner:
-    """RRT 快速随机树规划器
+    """RRT planner with goal biasing for 2D grids."""
 
-    RRT 原理:
-    1. 从起点开始生长一棵随机树
-    2. 每次随机采样一个点
-    3. 从树上最近的节点向采样点扩展一步 (step_size)
-    4. 如果扩展的路径无障碍, 将新节点加入树
-    5. 重复直到新节点足够接近目标
+    def __init__(self, grid, step_size=2.0, goal_bias=0.1, max_iterations=5000, goal_threshold=2.0, seed=None):
+        self.grid = grid
+        self.rows = len(grid)
+        self.cols = len(grid[0]) if self.rows > 0 else 0
+        self.step_size = step_size
+        self.goal_bias = goal_bias
+        self.max_iter = max_iterations
+        self.goal_thresh = goal_threshold
+        if seed is not None:
+            random.seed(seed)
 
-    特点: 快速找到可行解, 但路径不一定最优
-    """
-    def __init__(self, grid_map: GridMap, step_size: float = 0.5,
-                 goal_bias: float = 0.1, max_iter: int = 5000):
-        self.map = grid_map
-        self.step_size = step_size  # 每步扩展距离 (米)
-        self.goal_bias = goal_bias  # 朝目标采样的概率
-        self.max_iter = max_iter
-        self.nodes = []  # [(x, y, parent_idx), ...]
-
-    def plan(self, start: Tuple[float, float],
-             goal: Tuple[float, float]) -> Optional[List[Tuple[float, float]]]:
-        """RRT 搜索
-        start, goal: 世界坐标 (米)
-        返回: 路径点列表 (世界坐标), 或 None
-        """
-        self.nodes = [(start[0], start[1], -1)]
-
-        for i in range(self.max_iter):
-            # 采样: goal_bias 概率朝目标, 否则随机
-            if random.random() < self.goal_bias:
-                rx, ry = goal
-            else:
-                rx = random.uniform(0, self.map.width * self.map.resolution)
-                ry = random.uniform(0, self.map.height * self.map.resolution)
-
-            # 找最近节点
-            nearest_idx = self._nearest(rx, ry)
-            nx, ny, _ = self.nodes[nearest_idx]
-
-            # 向采样点扩展一步
-            dx, dy = rx - nx, ry - ny
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist < 1e-6:
-                continue
-            step = min(self.step_size, dist)
-            sx = nx + dx / dist * step
-            sy = ny + dy / dist * step
-
-            # 检查路径是否无碰撞
-            if not self._collision_free(nx, ny, sx, sy):
-                continue
-
-            # 加入新节点
-            self.nodes.append((sx, sy, nearest_idx))
-
-            # 检查是否到达目标
-            if math.sqrt((sx - goal[0])**2 + (sy - goal[1])**2) < self.step_size:
-                self.nodes.append((goal[0], goal[1], len(self.nodes) - 1))
-                return self._reconstruct(len(self.nodes) - 1)
-
-        return None  # 超过最大迭代
-
-    def _nearest(self, x, y):
-        best_i, best_d = 0, float('inf')
-        for i, (nx, ny, _) in enumerate(self.nodes):
-            d = (nx - x)**2 + (ny - y)**2
-            if d < best_d:
-                best_d = d
-                best_i = i
-        return best_i
-
-    def _collision_free(self, x1, y1, x2, y2) -> bool:
-        """线段碰撞检测 (Bresenham)"""
-        gx1, gy1 = self.map.world_to_grid(x1, y1)
-        gx2, gy2 = self.map.world_to_grid(x2, y2)
-        # 简单采样检测
-        steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
-        for i in range(steps + 1):
-            t = i / steps
-            gx = int(gx1 + t * (gx2 - gx1))
-            gy = int(gy1 + t * (gy2 - gy1))
-            if not self.map.is_free(gx, gy):
+    def _collision_free(self, p1, p2):
+        dx, dy = p2[0]-p1[0], p2[1]-p1[1]
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 1e-6:
+            return True
+        steps = max(int(dist*2), 1)
+        for i in range(steps+1):
+            t = i/steps
+            x, y = p1[0]+t*dx, p1[1]+t*dy
+            ix, iy = int(round(x)), int(round(y))
+            if ix < 0 or ix >= self.cols or iy < 0 or iy >= self.rows:
+                return False
+            if self.grid[iy][ix] == 1:
                 return False
         return True
 
-    def _reconstruct(self, idx):
-        path = []
-        while idx != -1:
-            x, y, idx = self.nodes[idx]
-            path.append((x, y))
-        path.reverse()
-        return path
+    def _nearest(self, tree, point):
+        min_d, min_i = float("inf"), 0
+        for i, n in enumerate(tree):
+            d = math.sqrt((n[0]-point[0])**2 + (n[1]-point[1])**2)
+            if d < min_d:
+                min_d, min_i = d, i
+        return min_i
 
-
-class RRTStarPlanner(RRTPlanner):
-    """RRT* 规划器 (在 RRT 基础上增加路径优化)
-
-    RRT* 改进:
-    - 新节点加入时, 选择使总代价最小的父节点 (choose_parent)
-    - 加入后尝试重连周围节点 (rewire), 使路径更短
-    - 渐近最优: 随着迭代增加, 路径趋近最优解
-    """
-    def __init__(self, grid_map: GridMap, step_size=0.5, goal_bias=0.1,
-                 max_iter=5000, rewire_radius: float = 1.0):
-        super().__init__(grid_map, step_size, goal_bias, max_iter)
-        self.rewire_radius = rewire_radius
+    def _steer(self, fr, to):
+        dx, dy = to[0]-fr[0], to[1]-fr[1]
+        d = math.sqrt(dx*dx + dy*dy)
+        if d <= self.step_size:
+            return to
+        r = self.step_size/d
+        return (fr[0]+dx*r, fr[1]+dy*r)
 
     def plan(self, start, goal):
-        self.nodes = [(start[0], start[1], -1)]
-        self.costs = [0.0]  # 每个节点的累计代价
-
-        for i in range(self.max_iter):
-            if random.random() < self.goal_bias:
-                rx, ry = goal
-            else:
-                rx = random.uniform(0, self.map.width * self.map.resolution)
-                ry = random.uniform(0, self.map.height * self.map.resolution)
-
-            nearest_idx = self._nearest(rx, ry)
-            nx, ny, _ = self.nodes[nearest_idx]
-
-            dx, dy = rx - nx, ry - ny
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist < 1e-6:
+        """RRT search. Returns [(x,y),...] or None."""
+        tree = [start]
+        parent = {0: -1}
+        for _ in range(self.max_iter):
+            rand = goal if random.random() < self.goal_bias else (random.uniform(0, self.cols-1), random.uniform(0, self.rows-1))
+            ni = self._nearest(tree, rand)
+            new = self._steer(tree[ni], rand)
+            if not self._collision_free(tree[ni], new):
                 continue
-            step = min(self.step_size, dist)
-            sx = nx + dx / dist * step
-            sy = ny + dy / dist * step
-
-            if not self._collision_free(nx, ny, sx, sy):
-                continue
-
-            # choose_parent: 找周围节点中使代价最小的
-            best_parent = nearest_idx
-            best_cost = self.costs[nearest_idx] + math.sqrt((sx-nx)**2 + (sy-ny)**2)
-            for j, (px, py, _) in enumerate(self.nodes):
-                if j == nearest_idx:
-                    continue
-                d = math.sqrt((sx-px)**2 + (sy-py)**2)
-                if d < self.rewire_radius and self._collision_free(px, py, sx, sy):
-                    c = self.costs[j] + d
-                    if c < best_cost:
-                        best_cost = c
-                        best_parent = j
-
-            new_idx = len(self.nodes)
-            self.nodes.append((sx, sy, best_parent))
-            self.costs.append(best_cost)
-
-            # rewire: 尝试通过新节点优化周围节点
-            for j, (px, py, _) in enumerate(self.nodes):
-                if j == best_parent or j >= new_idx:
-                    continue
-                d = math.sqrt((sx-px)**2 + (sy-py)**2)
-                if d < self.rewire_radius:
-                    new_cost = best_cost + d
-                    if new_cost < self.costs[j] and self._collision_free(sx, sy, px, py):
-                        self.nodes[j] = (px, py, new_idx)
-                        self.costs[j] = new_cost
-
-            if math.sqrt((sx - goal[0])**2 + (sy - goal[1])**2) < self.step_size:
-                goal_idx = len(self.nodes)
-                self.nodes.append((goal[0], goal[1], new_idx))
-                self.costs.append(best_cost + math.sqrt((sx-goal[0])**2 + (sy-goal[1])**2))
-                return self._reconstruct(goal_idx)
-
+            idx = len(tree)
+            tree.append(new)
+            parent[idx] = ni
+            if math.sqrt((new[0]-goal[0])**2 + (new[1]-goal[1])**2) <= self.goal_thresh:
+                path = [goal]
+                j = idx
+                while j != -1:
+                    path.append(tree[j])
+                    j = parent[j]
+                path.reverse()
+                return path
         return None
+
+class RRTStarPlanner:
+    """RRT* planner with rewiring for asymptotic optimality."""
+
+    def __init__(self, grid, step_size=2.0, goal_bias=0.1, max_iterations=5000, goal_threshold=2.0, search_radius=5.0, seed=None):
+        self.grid = grid
+        self.rows = len(grid)
+        self.cols = len(grid[0]) if self.rows > 0 else 0
+        self.step_size = step_size
+        self.goal_bias = goal_bias
+        self.max_iter = max_iterations
+        self.goal_thresh = goal_threshold
+        self.search_radius = search_radius
+        if seed is not None:
+            random.seed(seed)
+
+    def _collision_free(self, p1, p2):
+        dx, dy = p2[0]-p1[0], p2[1]-p1[1]
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 1e-6:
+            return True
+        steps = max(int(dist*2), 1)
+        for i in range(steps+1):
+            t = i/steps
+            x, y = p1[0]+t*dx, p1[1]+t*dy
+            ix, iy = int(round(x)), int(round(y))
+            if ix < 0 or ix >= self.cols or iy < 0 or iy >= self.rows:
+                return False
+            if self.grid[iy][ix] == 1:
+                return False
+        return True
+
+    def _dist(self, a, b):
+        return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+
+    def _steer(self, fr, to):
+        dx, dy = to[0]-fr[0], to[1]-fr[1]
+        d = math.sqrt(dx*dx + dy*dy)
+        if d <= self.step_size:
+            return to
+        r = self.step_size/d
+        return (fr[0]+dx*r, fr[1]+dy*r)
+
+    def _near(self, tree, point):
+        n = len(tree)
+        r = min(self.search_radius, 2.0*math.sqrt(math.log(n+1)/(n+1)))
+        r = max(r, self.step_size)
+        return [i for i, nd in enumerate(tree) if self._dist(nd, point) <= r]
+
+    def plan(self, start, goal):
+        """RRT* search. Returns [(x,y),...] or None."""
+        tree = [start]
+        parent = {0: -1}
+        cost = {0: 0.0}
+        best_goal_idx = None
+        best_goal_cost = float("inf")
+        for _ in range(self.max_iter):
+            rand = goal if random.random() < self.goal_bias else (random.uniform(0, self.cols-1), random.uniform(0, self.rows-1))
+            min_d, ni = float("inf"), 0
+            for i, nd in enumerate(tree):
+                d = self._dist(nd, rand)
+                if d < min_d:
+                    min_d, ni = d, i
+            new = self._steer(tree[ni], rand)
+            if not self._collision_free(tree[ni], new):
+                continue
+            near = self._near(tree, new)
+            best_pi = ni
+            best_c = cost[ni] + self._dist(tree[ni], new)
+            for qi in near:
+                c = cost[qi] + self._dist(tree[qi], new)
+                if c < best_c and self._collision_free(tree[qi], new):
+                    best_pi = qi
+                    best_c = c
+            idx = len(tree)
+            tree.append(new)
+            parent[idx] = best_pi
+            cost[idx] = best_c
+            for qi in near:
+                pc = cost[idx] + self._dist(new, tree[qi])
+                if pc < cost[qi] and self._collision_free(new, tree[qi]):
+                    parent[qi] = idx
+                    cost[qi] = pc
+            dg = self._dist(new, goal)
+            if dg <= self.goal_thresh:
+                tc = cost[idx] + dg
+                if tc < best_goal_cost:
+                    best_goal_cost = tc
+                    best_goal_idx = idx
+        if best_goal_idx is not None:
+            path = [goal]
+            j = best_goal_idx
+            while j != -1:
+                path.append(tree[j])
+                j = parent[j]
+            path.reverse()
+            return path
+        return None
+
+
+def visualize_path(grid, path=None, start=None, goal=None, title="Path Planning", save_path=None):
+    """Visualize path on grid. Requires matplotlib (optional)."""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
+    except ImportError:
+        print("matplotlib not installed, skipping visualization.")
+        return
+    fig, ax = plt.subplots(figsize=(10, 10))
+    cmap = mcolors.ListedColormap(["white", "black"])
+    ax.imshow(grid, cmap=cmap, origin="lower", interpolation="nearest")
+    if path and len(path) > 1:
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        ax.plot(xs, ys, "b-", linewidth=2, label="Path")
+        ax.plot(xs, ys, "bo", markersize=4)
+    if start:
+        ax.plot(start[0], start[1], "go", markersize=12, label="Start")
+    if goal:
+        ax.plot(goal[0], goal[1], "r*", markersize=15, label="Goal")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    else:
+        plt.show()
